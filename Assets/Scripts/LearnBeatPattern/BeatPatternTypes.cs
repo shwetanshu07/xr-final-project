@@ -76,4 +76,23 @@ public class MetricsResult
 
     // Single most important feedback message - worst performing metric
     public string mainIssue;
+
+    // ── PRACTICE MODE — Directional Segment Analysis ──────────────
+
+    // How many segments had correct dominant direction
+    public int correctDirectionalSegments;
+
+    // Total number of segments expected for this pattern
+    public int totalDirectionalSegments;
+
+    // Per-segment result — true if direction was correct
+    public bool[] segmentDirectionCorrect;
+
+    // Percentage of segments with correct direction (0-100)
+    public float directionalAccuracyPercent;
+
+    // Adaptive timer value used for next attempt
+    // Set by PracticeSceneManager based on this attempt's score
+    public float nextAttemptTimeoutSeconds;
+
 }

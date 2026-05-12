@@ -21,6 +21,7 @@ public class AudioManager : MonoBehaviour
     [Header("Sound Effects")]
     [SerializeField] private AudioClip successClip;
     [SerializeField] private AudioClip failClip;
+    // [SerializeField] private AudioClip welcomeClip;
 
     void Awake()
     {
@@ -45,8 +46,14 @@ public class AudioManager : MonoBehaviour
         PlayClip(failClip, "fail");
     }
 
+    // Plays welcome audio when scene loads
+    // public void PlayWelcome()
+    // {
+    //     PlayClip(welcomeClip, "welcome");
+    // }
+
     // Generic clip player with null check and log
-    private void PlayClip(AudioClip clip, string clipName)
+    public void PlayClip(AudioClip clip, string clipName)
     {
         if (clip == null)
         {

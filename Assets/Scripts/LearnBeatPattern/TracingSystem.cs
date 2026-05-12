@@ -60,6 +60,18 @@ public class TracingSystem : MonoBehaviour
     // Press Space in editor to force start tracing without needing headset
     [SerializeField] private bool enableEditorShortcut = true;
 
+    [Header("Haptic Feedback")]
+    // Amplitude of haptic pulse (0 to 1)
+    [SerializeField] private float hapticAmplitude = 0.3f;
+    // Duration of each haptic pulse in seconds
+    [SerializeField] private float hapticDuration  = 0.1f;
+    // How often to send a new pulse while off path (seconds)
+    [SerializeField] private float hapticInterval  = 0.1f;
+
+    // Haptic tracking
+    private float lastHapticTime   = 0f;
+    private bool  isHapticActive   = false;
+
     // Events fired to SceneManager
     public event Action<MetricsResult> OnTraceSuccess;
     public event Action<FailReason>    OnTraceFailed;
@@ -101,6 +113,9 @@ public class TracingSystem : MonoBehaviour
     // Controller position for velocity calculation (Metric 3)
     private Vector3 previousControllerPosition;
     private bool hasPreviousControllerPos = false;
+
+    private List<Vector3> recordedTracePoints = new List<Vector3>();
+    private List<Color>   recordedTraceColors = new List<Color>();
 
     // ── UNITY LIFECYCLE ───────────────────────────────────────────
 
@@ -172,6 +187,7 @@ public class TracingSystem : MonoBehaviour
     // Called by SceneManager when Try Again button is pressed
     public void ResetTrace()
     {
+        StopHaptic();
         foreach (LineRenderer seg in trailSegments)
         {
             if (seg != null)
@@ -184,6 +200,10 @@ public class TracingSystem : MonoBehaviour
         trailSegments.Clear();
         currentSegment = null;
 
+        // Clear recorded trace for minimap
+        recordedTracePoints.Clear();
+        recordedTraceColors.Clear();
+
         elapsedTime              = 0f;
         triggerHeld              = false;
         hasLastPosition          = false;
@@ -195,6 +215,11 @@ public class TracingSystem : MonoBehaviour
         SetState(TracingState.Idle);
         Debug.Log("[TracingSystem] Reset complete - ready for new attempt");
     }
+
+    // Returns recorded trace positions for minimap generation
+    // Called by MinimapGenerator after attempt ends
+    public List<Vector3> GetTracePoints() => new List<Vector3>(recordedTracePoints);
+    public List<Color>   GetTraceColors() => new List<Color>(recordedTraceColors);
 
     // ── INPUT CALLBACKS ───────────────────────────────────────────
 
@@ -283,6 +308,22 @@ public class TracingSystem : MonoBehaviour
         // Send frame data to metrics collector
         metricsCollector.RecordFrame(hitPosition, deviation, velocity);
 
+        // Haptic feedback when deviation is in far (red) zone
+        if (deviation > mediumThreshold)
+        {
+            if (Time.time - lastHapticTime >= hapticInterval)
+            {
+                TriggerHaptic();
+                lastHapticTime = Time.time;
+                isHapticActive = true;
+            }
+        }
+        else
+        {
+            if (isHapticActive)
+                StopHaptic();
+        }
+
         // Check if player reached end point
         if (beatPathManager.IsNearEndPoint(hitPosition))
         {
@@ -292,14 +333,13 @@ public class TracingSystem : MonoBehaviour
     }
 
     // ── TRAIL DRAWING ─────────────────────────────────────────────
-
     private void DrawTrailPoint(Vector3 position, float deviation)
     {
         Color targetColor = GetColorForDeviation(deviation);
 
         bool needNewSegment = currentSegment == null ||
-                              !hasLastPosition ||
-                              currentSegment.startColor != targetColor;
+                            !hasLastPosition ||
+                            currentSegment.startColor != targetColor;
 
         if (needNewSegment)
         {
@@ -316,6 +356,10 @@ public class TracingSystem : MonoBehaviour
 
         lastHitPosition = position;
         hasLastPosition = true;
+
+        // Record for minimap generation
+        recordedTracePoints.Add(position);
+        recordedTraceColors.Add(targetColor);
     }
 
     private LineRenderer CreateTrailSegment(Color color)
@@ -383,6 +427,7 @@ public class TracingSystem : MonoBehaviour
 
     private void HandleSuccess()
     {
+        StopHaptic();
         SetState(TracingState.Finished);
         beatPathManager.ShowEndOrb();
 
@@ -392,6 +437,7 @@ public class TracingSystem : MonoBehaviour
 
     private void HandleFail(FailReason reason)
     {
+        StopHaptic();
         SetState(TracingState.Finished);
 
         MetricsResult result = metricsCollector.GetResult(false);
@@ -444,5 +490,35 @@ public class TracingSystem : MonoBehaviour
     {
         Debug.Log($"[TracingSystem] State: {currentState} → {newState}");
         currentState = newState;
+    }
+
+    // Sends one haptic pulse to the right controller
+    private void TriggerHaptic()
+    {
+        var devices = new List<UnityEngine.XR.InputDevice>();
+        UnityEngine.XR.InputDevices.GetDevicesWithCharacteristics(
+            UnityEngine.XR.InputDeviceCharacteristics.Right |
+            UnityEngine.XR.InputDeviceCharacteristics.Controller,
+            devices
+        );
+
+        foreach (var device in devices)
+            device.SendHapticImpulse(0, hapticAmplitude, hapticDuration);
+    }
+
+    // Stops haptic by sending zero amplitude pulse
+    private void StopHaptic()
+    {
+        var devices = new List<UnityEngine.XR.InputDevice>();
+        UnityEngine.XR.InputDevices.GetDevicesWithCharacteristics(
+            UnityEngine.XR.InputDeviceCharacteristics.Right |
+            UnityEngine.XR.InputDeviceCharacteristics.Controller,
+            devices
+        );
+
+        foreach (var device in devices)
+            device.SendHapticImpulse(0, 0, 0);
+
+        isHapticActive = false;
     }
 }

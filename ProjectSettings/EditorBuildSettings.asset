@@ -11,9 +11,21 @@ EditorBuildSettings:
   - enabled: 0
     path: Assets/MidiPlayer/Demo/FreeDemos/TestMidiFilePlayer.unity
     guid: ec4a814924685e549a6544b0a555a999
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/LearnBeatPattern.unity
     guid: 9f2e592b4426248728209734da5588c5
+  - enabled: 0
+    path: Assets/Scenes/LearnBeatPatternv2.unity
+    guid: c4db4d33472ca40aa82b12de5191721c
+  - enabled: 1
+    path: Assets/Scenes/LearnBeatPatternv3.unity
+    guid: a253155ce42364754a0b953104ca0311
+  - enabled: 1
+    path: Assets/Scenes/PracticeBeatPattern.unity
+    guid: 2d1d3d5d944fd462e90c6870c7af4212
+  - enabled: 1
+    path: Assets/Scenes/MainMenuv2.unity
+    guid: 019de910c36d2409d9ee52b047844120
   m_configObjects:
     Unity.XR.Oculus.Settings: {fileID: 11400000, guid: eb7e2be5e283f4edaa5458eee498375f,
       type: 2}

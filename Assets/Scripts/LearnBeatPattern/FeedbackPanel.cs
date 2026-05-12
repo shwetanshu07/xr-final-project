@@ -2,162 +2,277 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using System;
+using System.Collections.Generic;
 
-// Controls the feedback panel shown after each trace attempt.
-// MetricsText always shows raw metrics.
-// LLMFeedbackText shows AI coaching on success only.
-// On fail LLMFeedbackText is hidden entirely.
+// Controls the feedback panel shown after trace attempts.
+// Supports two modes:
+//   Immediate: shows after each attempt, no Prev/Next buttons
+//   Delayed:   shows all attempts together at end, with Prev/Next navigation
+//
+// SETUP:
+// 1. FeedbackCanvas → always active
+// 2. FeedbackBackground → starts inactive, toggled by Show/Hide
+// 3. feedbackBackground field → assign FeedbackBackground
+// 4. All other fields → assign in Inspector
 
 public class FeedbackPanel : MonoBehaviour
 {
     [Header("Panel Root")]
-    [SerializeField] private GameObject feedbackCanvas;
+    // Assign FeedbackBackground here (NOT FeedbackCanvas)
+    [SerializeField] private GameObject feedbackBackground;
 
     [Header("UI Elements")]
-    [SerializeField] private TextMeshProUGUI resultHeading;
+    [SerializeField] private TextMeshProUGUI attemptLabel;
+    [SerializeField] private RawImage        minimapImage;
     [SerializeField] private TextMeshProUGUI metricsText;
+    [SerializeField] private TextMeshProUGUI aiFeedbackText;
 
-    // Separate text field for LLM coaching
-    // Only shown on success - hidden on fail
-    [SerializeField] private TextMeshProUGUI llmFeedbackText;
+    [Header("Navigation (Delayed Mode Only)")]
+    [SerializeField] private GameObject navigationRow;
+    [SerializeField] private Button     prevButton;
+    [SerializeField] private Button     nextButton;
 
-    [SerializeField] private Button tryAgainButton;
+    // Event for external listeners if needed
+    public event Action OnPanelClosed;
 
-    [Header("Heading Colors")]
-    [SerializeField] private Color successColor = new Color(0.1f, 0.6f, 0.1f);
-    [SerializeField] private Color failColor    = new Color(0.7f, 0.1f, 0.1f);
+    // ── SESSION DATA ──────────────────────────────────────────────
 
-    // SceneManager subscribes to this
-    public event Action OnTryAgainPressed;
+    private List<Texture2D>     storedMinimaps = new List<Texture2D>();
+    private List<MetricsResult> storedResults  = new List<MetricsResult>();
+    private List<string>        storedAI       = new List<string>();
 
-    // Prevents double click from XR ray interactor
-    private bool isProcessingClick = false;
+    private int  currentIndex        = 0;
+    private bool isDelayedMode       = false;
+    private bool isProcessingNavClick = false;
+
+    // ── UNITY LIFECYCLE ───────────────────────────────────────────
 
     void Awake()
     {
-        if (tryAgainButton != null)
-            tryAgainButton.onClick.AddListener(HandleTryAgainClicked);
+        if (feedbackBackground != null)
+            feedbackBackground.SetActive(false);
+
+        if (prevButton != null)
+            prevButton.onClick.AddListener(ShowPrevAttempt);
+        if (nextButton != null)
+            nextButton.onClick.AddListener(ShowNextAttempt);
     }
 
     void OnDestroy()
     {
-        if (tryAgainButton != null)
-            tryAgainButton.onClick.RemoveAllListeners();
+        if (prevButton != null) prevButton.onClick.RemoveAllListeners();
+        if (nextButton != null) nextButton.onClick.RemoveAllListeners();
     }
 
-    // Shows panel with result and metrics
-    // Always shows raw metrics
-    // On success shows loading state in LLM field (LLMFeedbackManager updates it)
-    // On fail hides LLM field entirely
-    public void Show(MetricsResult result)
+    // ── PUBLIC METHODS ────────────────────────────────────────────
+
+    // Called by SceneManager to configure mode before session starts
+    public void SetMode(bool delayedFeedback)
     {
-        if (feedbackCanvas == null)
+        isDelayedMode = delayedFeedback;
+        if (navigationRow != null)
+            navigationRow.SetActive(false);
+    }
+
+    // Store attempt data without showing (used in delayed mode)
+    public void StoreAttempt(MetricsResult result, Texture2D minimap)
+    {
+        storedMinimaps.Add(minimap);
+        storedResults.Add(result);
+        storedAI.Add("Analysing...");
+        Debug.Log($"[FeedbackPanelAttemptDebug] StoreAttempt called - total stored: {storedResults.Count}");
+    }
+
+    // Update stored AI feedback for a specific attempt index
+    // Called by LLMFeedbackManager when response arrives
+    // Works for both immediate and delayed mode
+    public void SetStoredAIFeedback(int attemptIndex, string feedback)
+    {
+        Debug.Log($"[FeedbackPanel] SetStoredAIFeedback - index:{attemptIndex} storedAI.Count:{storedAI.Count} backgroundActive:{feedbackBackground.activeSelf} currentIndex:{currentIndex}");
+
+        if (attemptIndex < 0 || attemptIndex >= storedAI.Count)
         {
-            Debug.LogWarning("[FeedbackPanel] FeedbackCanvas not assigned");
+            Debug.LogError($"[FeedbackPanel] attemptIndex {attemptIndex} out of range — storedAI has {storedAI.Count} entries. Was ShowImmediate or StoreAttempt called first?");
             return;
         }
 
-        // Always update result heading
-        UpdateResultHeading(result);
+        storedAI[attemptIndex] = feedback;
 
-        // Always show raw metrics regardless of success or fail
-        metricsText.text = BuildMetricsText(result);
-
-        if (result.isSuccess)
+        // If panel is visible and showing this attempt update text immediately
+        if (feedbackBackground.activeSelf && currentIndex == attemptIndex)
         {
-            // Show LLM field with loading state
-            // LLMFeedbackManager will update this text when response arrives
-            if (llmFeedbackText != null)
-            {
-                llmFeedbackText.gameObject.SetActive(true);
-                llmFeedbackText.text = "Analysing your performance...";
-            }
+            if (aiFeedbackText != null)
+                aiFeedbackText.text = feedback;
+            Debug.Log("[FeedbackPanel] AI feedback text updated on screen");
         }
-        else
-        {
-            // Hide LLM field on fail - no AI feedback for failed attempts
-            if (llmFeedbackText != null)
-                llmFeedbackText.gameObject.SetActive(false);
-        }
-
-        feedbackCanvas.SetActive(true);
-        Debug.Log("[FeedbackPanel] Panel shown");
     }
 
-    // Called by LLMFeedbackManager when API response arrives
-    // Only called on success attempts
-    public void SetLLMFeedback(string feedback)
+    // Show single attempt (immediate mode — Learn scene)
+    // Called after each attempt in immediate mode
+    public void ShowImmediate(MetricsResult result, Texture2D minimap, int attemptNumber)
     {
-        if (llmFeedbackText != null)
-        {
-            llmFeedbackText.text = feedback;
-            Debug.Log("[FeedbackPanel] LLM feedback set");
-        }
+        if (feedbackBackground == null) return;
+
+        currentIndex = 0;
+
+        // IMPORTANT: Add placeholder to storedAI so SetStoredAIFeedback can
+        // update it when LLM response arrives. Without this entry the index
+        // check in SetStoredAIFeedback fails and feedback never shows.
+        if (storedAI.Count == 0)
+            storedAI.Add("Analysing...");
+        else
+            storedAI[0] = "Analysing...";
+
+        UpdateDisplay(result, minimap, "Analysing...", attemptNumber);
+
+        if (navigationRow != null)
+            navigationRow.SetActive(false);
+
+        feedbackBackground.SetActive(true);
     }
 
-    // Hides the panel and resets LLM text
+    // Show all stored attempts (delayed mode)
+    // Called after all attempts complete
+    public void ShowAllAttempts()
+    {
+        if (feedbackBackground == null) return;
+        if (storedResults.Count == 0) return;
+
+        currentIndex = 0;
+        DisplayStoredAttempt(0);
+
+        if (navigationRow != null)
+            navigationRow.SetActive(storedResults.Count > 1);
+
+        feedbackBackground.SetActive(true);
+        UpdateNavigationButtons();
+    }
+
+    // Update AI feedback text for current immediate attempt
+    // Called by LLMFeedbackManager in immediate mode
+    public void SetImmediateAIFeedback(string feedback)
+    {
+        if (aiFeedbackText != null)
+            aiFeedbackText.text = feedback;
+    }
+
+    // Hides the panel
     public void Hide()
     {
-        if (feedbackCanvas != null)
-            feedbackCanvas.SetActive(false);
+        if (feedbackBackground != null)
+            feedbackBackground.SetActive(false);
+    }
 
-        // Reset LLM text for next attempt
-        if (llmFeedbackText != null)
+    // Clears all stored session data - call at start of new session
+    public void ClearSession()
+    {
+        storedMinimaps.Clear();
+        storedResults.Clear();
+        storedAI.Clear();
+        currentIndex = 0;
+        Hide();
+    }
+
+    // ── NAVIGATION ────────────────────────────────────────────────
+
+    public void ShowNextAttempt()
+    {
+        if (isProcessingNavClick) return;
+        isProcessingNavClick = true;
+        StartCoroutine(ResetNavClickFlag());
+
+        Debug.Log($"[AttemptDebug] ShowNext - currentIndex:{currentIndex} storedCount:{storedResults.Count}");
+        if (currentIndex < storedResults.Count - 1)
         {
-            llmFeedbackText.text = "";
-            llmFeedbackText.gameObject.SetActive(false);
+            currentIndex++;
+            DisplayStoredAttempt(currentIndex);
+            UpdateNavigationButtons();
         }
+    }
 
-        isProcessingClick = false;
-        Debug.Log("[FeedbackPanel] Panel hidden");
+    public void ShowPrevAttempt()
+    {
+        if (isProcessingNavClick) return;
+        isProcessingNavClick = true;
+        StartCoroutine(ResetNavClickFlag());
+
+        if (currentIndex > 0)
+        {
+            currentIndex--;
+            DisplayStoredAttempt(currentIndex);
+            UpdateNavigationButtons();
+        }
+    }
+
+    private System.Collections.IEnumerator ResetNavClickFlag()
+    {
+        yield return new WaitForSeconds(0.3f);
+        isProcessingNavClick = false;
     }
 
     // ── PRIVATE HELPERS ───────────────────────────────────────────
 
-    private void UpdateResultHeading(MetricsResult result)
+    private void DisplayStoredAttempt(int index)
     {
-        if (resultHeading == null) return;
+        if (index < 0 || index >= storedResults.Count) return;
 
-        if (result.isSuccess)
-        {
-            resultHeading.text  = "Success!";
-            resultHeading.color = successColor;
-        }
-        else
-        {
-            string reason = result.failReason == FailReason.Timeout
-                ? "Time ran out"
-                : "Trigger released";
-            resultHeading.text  = $"Failed — {reason}";
-            resultHeading.color = failColor;
-        }
+        UpdateDisplay(
+            storedResults[index],
+            storedMinimaps[index],
+            storedAI[index],
+            index + 1
+        );
     }
 
-    // Builds raw metrics text - always shown regardless of success or fail
+    private void UpdateDisplay(MetricsResult result, Texture2D minimap,
+                                string aiFeedback, int attemptNumber)
+    {
+        if (attemptLabel != null)
+            attemptLabel.text = $"Attempt {attemptNumber}";
+
+        if (minimapImage != null && minimap != null)
+            minimapImage.texture = minimap;
+
+        if (metricsText != null)
+            metricsText.text = BuildMetricsText(result);
+
+        if (aiFeedbackText != null)
+            aiFeedbackText.text = aiFeedback;
+    }
+
+    private void UpdateNavigationButtons()
+    {
+        if (prevButton != null)
+            prevButton.interactable = currentIndex > 0;
+        if (nextButton != null)
+            nextButton.interactable = currentIndex < storedResults.Count - 1;
+    }
+
     private string BuildMetricsText(MetricsResult result)
     {
-        float deviationCm      = result.averagePathDeviation * 100f;
-        string deviationRating = GetDeviationRating(deviationCm);
-        string speedRating     = GetSpeedRating(result.speedConsistencyScore);
+        float deviationCm = result.averagePathDeviation * 100f;
 
         string text = "";
-
-        text += $"• Path Accuracy: {deviationRating} ({deviationCm:F1}cm avg)\n\n";
-
-        if (result.ictusTotal > 0)
-            text += $"• Beat Positions: {result.ictusHits}/{result.ictusTotal} hit ({result.ictusAccuracyPercent:F0}%)\n\n";
-        else
-            text += "• Beat Positions: Not tracked\n\n";
-
-        text += $"• Speed Consistency: {speedRating} ({result.speedConsistencyScore:F0}%)";
-
+        text += $"Path Accuracy:      {GetDeviationRating(deviationCm)} ({deviationCm:F1}cm)\n";
+        text += $"Beat Positions Hit: {result.ictusHits}/{result.ictusTotal}\n";
+        text += $"Speed Consistency:  {GetSpeedRating(result.speedConsistencyScore)}\n";
+        text += $"Overall Score:      {CalculateOverallScore(result):F0}/100";
         return text;
     }
 
-    private string GetDeviationRating(float deviationCm)
+    private float CalculateOverallScore(MetricsResult result)
     {
-        if (deviationCm <= 5f)  return "Excellent";
-        if (deviationCm <= 10f) return "Good";
+        float deviationScore = Mathf.Clamp01(
+            1f - (result.averagePathDeviation / 0.10f)) * 100f;
+        return (deviationScore * 0.35f) +
+               (result.ictusAccuracyPercent * 0.40f) +
+               (result.speedConsistencyScore * 0.25f);
+    }
+
+    private string GetDeviationRating(float cm)
+    {
+        if (cm <= 5f)  return "Excellent";
+        if (cm <= 10f) return "Good";
         return "Needs Work";
     }
 
@@ -168,22 +283,67 @@ public class FeedbackPanel : MonoBehaviour
         return "Needs Work";
     }
 
-    private void HandleTryAgainClicked()
+    // ── PRACTICE MODE ─────────────────────────────────────────────
+
+    // Called by PracticeSceneManager to show practice-specific metrics
+    // Replaces path accuracy with directional accuracy
+    public void ShowImmediatePractice(MetricsResult result, Texture2D minimap, int attemptNumber)
     {
+        if (feedbackBackground == null) return;
 
-        Debug.Log("[FeedbackPanel] Before check Try Again pressed");
-        if (isProcessingClick) return;
+        currentIndex = 0;
 
-        isProcessingClick = true;
-        Debug.Log("[FeedbackPanel] Try Again pressed");
-        OnTryAgainPressed?.Invoke();
+        // IMPORTANT: Same fix as ShowImmediate — add placeholder to storedAI
+        // so SetStoredAIFeedback can update it when LLM response arrives
+        if (storedAI.Count == 0)
+            storedAI.Add("Analysing...");
+        else
+            storedAI[0] = "Analysing...";
 
-        StartCoroutine(ResetClickFlag());
+        UpdateDisplayPractice(result, minimap, "Analysing...", attemptNumber);
+
+        if (navigationRow != null)
+            navigationRow.SetActive(false);
+
+        feedbackBackground.SetActive(true);
     }
 
-    private System.Collections.IEnumerator ResetClickFlag()
+    private void UpdateDisplayPractice(MetricsResult result, Texture2D minimap,
+                                        string aiFeedback, int attemptNumber)
     {
-        yield return new WaitForSeconds(0.3f);
-        isProcessingClick = false;
+        if (attemptLabel != null)
+            attemptLabel.text = $"Attempt {attemptNumber}";
+
+        if (minimapImage != null && minimap != null)
+            minimapImage.texture = minimap;
+
+        if (metricsText != null)
+            metricsText.text = BuildPracticeMetricsText(result);
+
+        if (aiFeedbackText != null)
+            aiFeedbackText.text = aiFeedback;
+    }
+
+    private string BuildPracticeMetricsText(MetricsResult result)
+    {
+        string dirRating = result.directionalAccuracyPercent >= 80f ? "Excellent" :
+                           result.directionalAccuracyPercent >= 60f ? "Good" : "Needs Work";
+
+        string speedRating = GetSpeedRating(result.speedConsistencyScore);
+
+        string text = "";
+        text += $"Stroke Direction:   {dirRating} " +
+                $"({result.correctDirectionalSegments}/{result.totalDirectionalSegments} correct)\n";
+        text += $"Beat Positions:     {result.ictusHits}/{result.ictusTotal} reversals\n";
+        text += $"Speed Consistency:  {speedRating}\n";
+        text += $"Overall Score:      {CalculatePracticeScore(result):F0}/100";
+        return text;
+    }
+
+    private float CalculatePracticeScore(MetricsResult result)
+    {
+        return (result.directionalAccuracyPercent * 0.50f) +
+               (result.ictusAccuracyPercent        * 0.25f) +
+               (result.speedConsistencyScore       * 0.25f);
     }
 }
